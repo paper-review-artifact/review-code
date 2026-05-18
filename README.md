@@ -1,78 +1,212 @@
-# Synaptic Caching — KV Cache Eviction
+# Anonymous Artifact
 
-LLM 추론 시 KV Cache의 메모리 사용량을 제어하기 위한 eviction 전략입니다.
+This repository contains the code and scripts for the submitted paper.
 
-긴 시퀀스를 처리할 때 KV Cache가 GPU 메모리를 초과하지 않도록, 중요도가 낮은 토큰의 캐시를 선택적으로 eviction합니다. Sink 토큰(문맥 초반)과 Recent 토큰(최근 생성)은 항상 보존하고, 중간 영역은 전략에 따라 uniform sampling하거나 전부 제거합니다.
+## Overview
 
-## 아키텍처
+This project implements a KV cache eviction strategy for controlling memory usage during long-context LLM inference.
 
-```
+When processing long sequences, the method selectively evicts cached tokens so that KV cache memory does not exceed a fixed budget. Sink tokens at the beginning of the context and recent tokens near the end are always preserved, while tokens in the middle region are either uniformly sampled or fully removed depending on the selected strategy.
+
+## Architecture
+
+```text
 kv_eviction/
-├── __init__.py          # 패키지 진입점, 전체 public API re-export
-├── eviction.py          # 핵심 eviction 로직 (torch only, transformers 의존 없음)
-├── streaming.py         # 청크 기반 streaming prefill + perplexity 평가 엔진
-├── rope_patch.py        # RoPE monkey-patch (eviction 후 position 보정)
-├── model_utils.py       # 모델/토크나이저 로딩 유틸리티
-└── visualization.py     # eviction 패턴 heatmap 생성
+├── __init__.py          # Package entry point and public API re-export
+├── eviction.py          # Core eviction logic (torch only, no transformers dependency)
+├── streaming.py         # Chunk-based streaming prefill and perplexity evaluation
+├── rope_patch.py        # RoPE monkey-patch for position correction after eviction
+├── model_utils.py       # Model/tokenizer loading utilities
+└── visualization.py     # Eviction-pattern heatmap generation
 ```
 
-### 모듈별 역할
+## Module Descriptions
 
-**eviction.py** — 핵심 모듈. `SimpleEvictConfig`로 eviction 전략을 정의하고, `build_simple_keep_token_idx()`가 보존할 토큰 인덱스를 계산합니다. `evict_dynamic_cache_inplace()`는 HuggingFace `DynamicCache`의 K/V 텐서를 직접 슬라이싱하여 메모리를 해제합니다. transformers 의존 없이 torch만으로 동작합니다.
+### eviction.py
 
-**streaming.py** — 긴 시퀀스를 chunk 단위로 나눠 모델에 입력하고, cache가 target을 초과하면 eviction을 수행합니다. 생성 태스크용 `streaming_prefill()`과 perplexity 평가용 `streaming_ppl()`, greedy 디코딩용 `greedy_decode()`를 제공합니다.
+Core eviction module. `SimpleEvictConfig` defines the eviction strategy, and `build_simple_keep_token_idx()` computes the token indices to preserve. `evict_dynamic_cache_inplace()` directly slices the K/V tensors in the HuggingFace `DynamicCache` to release memory. This module only depends on PyTorch.
 
-**rope_patch.py** — Eviction 후 살아남은 토큰들의 position이 불연속이 되는 문제를 해결합니다. Attention 레이어를 monkey-patch하여 raw(미회전) K를 캐시에 저장하고, attention 시점에 연속적인 slot position `[0..kv_len-1]`으로 RoPE를 재적용합니다. Llama, Qwen2의 FlashAttention2 레이어를 지원합니다.
+### streaming.py
 
-**model_utils.py** — HuggingFace 모델과 토크나이저를 로드합니다. Flash Attention 2를 우선 시도하고, 불가능하면 standard attention으로 fallback합니다.
+Provides chunk-based long-sequence processing. It performs eviction when the cache exceeds the target budget. It includes `streaming_prefill()` for generation tasks, `streaming_ppl()` for perplexity evaluation, and `greedy_decode()` for greedy decoding.
 
-**visualization.py** — eviction 패턴을 heatmap으로 시각화합니다. 어떤 토큰이 보존/제거되었는지를 레이어×포지션 격자로 보여줍니다.
+### rope_patch.py
 
-## Eviction 전략
+Addresses the discontinuous-position issue after eviction. The attention layer is monkey-patched so that raw, unrotated keys are stored in the cache, and RoPE is reapplied at attention time using continuous slot positions `[0..kv_len-1]`. This module supports FlashAttention2 layers in Llama and Qwen2-style models.
 
-캐시를 세 영역으로 분할하여 eviction을 수행합니다:
+### model_utils.py
 
-```
-[0 ............. sink_end)       → SINK   (항상 보존)
-[sink_end ... recent_start)      → MIDDLE (전략에 따라 처리)
-[recent_start ...... total_len)  → RECENT (항상 보존)
+Loads HuggingFace models and tokenizers. It first attempts to use FlashAttention2 and falls back to standard attention when FlashAttention2 is unavailable.
+
+### visualization.py
+
+Generates heatmaps for eviction patterns. The heatmap shows which tokens are preserved or evicted across layers and positions.
+
+## Eviction Strategies
+
+The cache is divided into three regions:
+
+```text
+[0 ............. sink_end)       -> SINK   (always preserved)
+[sink_end ... recent_start)      -> MIDDLE (strategy-dependent)
+[recent_start ...... total_len)  -> RECENT (always preserved)
 ```
 
 ### sink_recent
 
-중간 영역을 전부 제거합니다. 가장 공격적인 전략으로 메모리 절약이 극대화되지만, 중간 문맥 정보를 모두 잃습니다.
+Removes the entire middle region. This is the most aggressive strategy and maximizes memory reduction, but it discards all middle-context information.
 
 ```python
-build_eviction_config(strategy="sink_recent", sink_tokens=256, recent_tokens=512)
+build_eviction_config(
+    strategy="sink_recent",
+    sink_tokens=256,
+    recent_tokens=512,
+)
 ```
 
 ### sink_recent_uniform
 
-중간 영역에서 균일 간격으로 블록을 샘플링하여 보존합니다. 블록 크기는 Flash Attention의 블록 크기(128)에 맞춰져 있습니다. 두 가지 방식으로 중간 영역의 보존량을 제어할 수 있습니다:
+Uniformly samples blocks from the middle region. The block size is aligned with the FlashAttention block size, 128 tokens. The amount of preserved middle-region tokens can be controlled in two ways.
 
-- **budget 방식** — 보존할 중간 토큰 수를 직접 지정합니다. 지정된 budget을 블록 단위로 환산하여 `torch.linspace`로 균일하게 블록을 선택합니다.
+#### Budget mode
 
-```python
-build_eviction_config(
-    strategy="sink_recent_uniform",
-    sink_tokens=256, recent_tokens=512,
-    middle_budget=256,   # 중간 영역에서 256토큰 분량의 블록을 균일 보존
-)
-```
-
-- **stride 방식** — 매 N번째 블록을 보존합니다. budget보다 우선 적용됩니다.
+Directly specifies the number of middle tokens to preserve. The budget is converted into block units, and blocks are selected uniformly using `torch.linspace`.
 
 ```python
 build_eviction_config(
     strategy="sink_recent_uniform",
-    sink_tokens=256, recent_tokens=512,
-    uniform_stride=4,   # 중간 영역에서 4블록마다 1블록 보존
+    sink_tokens=256,
+    recent_tokens=512,
+    middle_budget=256,
 )
 ```
 
-### RoPE 모드
+#### Stride mode
 
-eviction 후 position encoding 처리 방식을 선택할 수 있습니다:
+Preserves every N-th block in the middle region. This option takes priority over the budget mode.
 
-- **abs** (기본값) — 원래 absolute position을 유지합니다. eviction 후 position에 gap이 생기지만 추가 패치 없이 동작합니다.
-- **raw_rel** — `patch_model_raw_kv()`로 모델을 패치하여, 캐시에 미회전 K를 저장하고 attention 시 연속 position으로 RoPE를 재적용합니다. Position gap 문제를 해결하여 품질 저하를 줄입니다.
+```python
+build_eviction_config(
+    strategy="sink_recent_uniform",
+    sink_tokens=256,
+    recent_tokens=512,
+    uniform_stride=4,
+)
+```
+
+## RoPE Modes
+
+The position-encoding behavior after eviction can be selected with the following modes:
+
+- `abs`: Keeps the original absolute positions. This mode works without additional patching, but position gaps remain after eviction.
+- `raw_rel`: Uses `patch_model_raw_kv()` to store raw keys in the cache and reapply RoPE with continuous positions at attention time. This mode reduces the position-gap issue after eviction.
+
+## Installation
+
+Create a Python environment and install the required packages.
+
+```bash
+conda create -n kv-eviction python=3.10
+conda activate kv-eviction
+pip install -r requirements.txt
+```
+
+If FlashAttention2 is available in the environment, the model loader will try to use it. Otherwise, it falls back to standard attention.
+
+## Basic Usage
+
+The eviction configuration can be created as follows:
+
+```python
+from kv_eviction.eviction import build_eviction_config
+
+config = build_eviction_config(
+    strategy="sink_recent_uniform",
+    sink_tokens=256,
+    recent_tokens=512,
+    middle_budget=256,
+    rope_mode="abs",
+)
+```
+
+For RoPE correction mode:
+
+```python
+from kv_eviction.eviction import build_eviction_config
+from kv_eviction.rope_patch import patch_model_raw_kv
+
+config = build_eviction_config(
+    strategy="sink_recent_uniform",
+    sink_tokens=256,
+    recent_tokens=512,
+    middle_budget=256,
+    rope_mode="raw_rel",
+)
+
+patch_model_raw_kv(model)
+```
+
+## Running Long-Context Evaluation
+
+Example usage for perplexity evaluation:
+
+```python
+from kv_eviction.streaming import streaming_ppl
+
+ppl = streaming_ppl(
+    model=model,
+    tokenizer=tokenizer,
+    text=text,
+    config=config,
+    chunk_size=2048,
+    target_cache_size=4096,
+)
+
+print(ppl)
+```
+
+Example usage for streaming prefill and greedy decoding:
+
+```python
+from kv_eviction.streaming import streaming_prefill, greedy_decode
+
+past_key_values = streaming_prefill(
+    model=model,
+    tokenizer=tokenizer,
+    input_ids=input_ids,
+    config=config,
+    chunk_size=2048,
+    target_cache_size=4096,
+)
+
+output_ids = greedy_decode(
+    model=model,
+    tokenizer=tokenizer,
+    input_ids=input_ids,
+    past_key_values=past_key_values,
+    max_new_tokens=256,
+)
+```
+
+## Visualization
+
+Eviction patterns can be visualized as heatmaps.
+
+```python
+from kv_eviction.visualization import visualize_eviction_pattern
+
+visualize_eviction_pattern(
+    keep_indices=keep_indices,
+    total_len=total_len,
+    save_path="eviction_pattern.png",
+)
+```
+
+The generated heatmap shows which token positions are preserved or removed after eviction.
+
+## Notes
+
+- This repository is anonymized for double-blind review.
+- No author names, affiliations, or personal paths are included.
+- The repository is intended to provide the implementation and scripts necessary to reproduce the main behavior of the proposed KV cache eviction method.
+- Model checkpoints and datasets should be downloaded separately according to their original licenses.
