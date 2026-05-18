@@ -1,0 +1,94 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773990585392,
+  "projectRoot": "/mnt/data1/yena/simple_kv_eviction/synaptic_caching/synaptic_caching",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "kv_eviction": {
+      "path": "kv_eviction",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1773990585387,
+      "keyFiles": [
+        "__init__.py",
+        "eviction.py",
+        "model_utils.py",
+        "rope_patch.py",
+        "streaming.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "kv_eviction/eviction.py",
+      "accessCount": 1,
+      "lastAccessed": 1773990810321,
+      "type": "file"
+    },
+    {
+      "path": "kv_eviction/__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1773990810415,
+      "type": "file"
+    },
+    {
+      "path": "kv_eviction/streaming.py",
+      "accessCount": 1,
+      "lastAccessed": 1773990810870,
+      "type": "file"
+    },
+    {
+      "path": "kv_eviction/model_utils.py",
+      "accessCount": 1,
+      "lastAccessed": 1773990816362,
+      "type": "file"
+    },
+    {
+      "path": "kv_eviction/rope_patch.py",
+      "accessCount": 1,
+      "lastAccessed": 1773990816791,
+      "type": "file"
+    },
+    {
+      "path": "kv_eviction/visualization.py",
+      "accessCount": 1,
+      "lastAccessed": 1773990817253,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1773990941552,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
