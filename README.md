@@ -1,105 +1,13 @@
 # Anonymous Artifact
 
-This repository contains the code and scripts for the submitted paper.
+> Anonymous code repository for the submitted paper.  
+> All author information, affiliations, and personal filesystem paths have been removed for double-blind review.
 
-## Overview
+This repository provides the implementation and scripts for a position-based KV cache eviction strategy for long-context LLM inference.
 
-This project implements a KV cache eviction strategy for controlling memory usage during long-context LLM inference.
+The method controls KV cache memory usage by selectively retaining tokens according to their positions. Tokens at the beginning of the context are treated as sink tokens and always retained, while recent tokens near the end of the sequence are also preserved. Tokens in the middle region are either uniformly sampled or removed depending on the selected eviction strategy.
 
-When processing long sequences, the method selectively evicts cached tokens so that KV cache memory does not exceed a fixed budget. Sink tokens at the beginning of the context and recent tokens near the end are always preserved, while tokens in the middle region are either uniformly sampled or fully removed depending on the selected strategy.
-
-## Architecture
-
-```text
-kv_eviction/
-├── __init__.py          # Package entry point and public API re-export
-├── eviction.py          # Core eviction logic (torch only, no transformers dependency)
-├── streaming.py         # Chunk-based streaming prefill and perplexity evaluation
-├── rope_patch.py        # RoPE monkey-patch for position correction after eviction
-├── model_utils.py       # Model/tokenizer loading utilities
-└── visualization.py     # Eviction-pattern heatmap generation
-```
-
-## Module Descriptions
-
-### eviction.py
-
-Core eviction module. `SimpleEvictConfig` defines the eviction strategy, and `build_simple_keep_token_idx()` computes the token indices to preserve. `evict_dynamic_cache_inplace()` directly slices the K/V tensors in the HuggingFace `DynamicCache` to release memory. This module only depends on PyTorch.
-
-### streaming.py
-
-Provides chunk-based long-sequence processing. It performs eviction when the cache exceeds the target budget. It includes `streaming_prefill()` for generation tasks, `streaming_ppl()` for perplexity evaluation, and `greedy_decode()` for greedy decoding.
-
-### rope_patch.py
-
-Addresses the discontinuous-position issue after eviction. The attention layer is monkey-patched so that raw, unrotated keys are stored in the cache, and RoPE is reapplied at attention time using continuous slot positions `[0..kv_len-1]`. This module supports FlashAttention2 layers in Llama and Qwen2-style models.
-
-### model_utils.py
-
-Loads HuggingFace models and tokenizers. It first attempts to use FlashAttention2 and falls back to standard attention when FlashAttention2 is unavailable.
-
-### visualization.py
-
-Generates heatmaps for eviction patterns. The heatmap shows which tokens are preserved or evicted across layers and positions.
-
-## Eviction Strategies
-
-The cache is divided into three regions:
-
-```text
-[0 ............. sink_end)       -> SINK   (always preserved)
-[sink_end ... recent_start)      -> MIDDLE (strategy-dependent)
-[recent_start ...... total_len)  -> RECENT (always preserved)
-```
-
-### sink_recent
-
-Removes the entire middle region. This is the most aggressive strategy and maximizes memory reduction, but it discards all middle-context information.
-
-```python
-build_eviction_config(
-    strategy="sink_recent",
-    sink_tokens=256,
-    recent_tokens=512,
-)
-```
-
-### sink_recent_uniform
-
-Uniformly samples blocks from the middle region. The block size is aligned with the FlashAttention block size, 128 tokens. The amount of preserved middle-region tokens can be controlled in two ways.
-
-#### Budget mode
-
-Directly specifies the number of middle tokens to preserve. The budget is converted into block units, and blocks are selected uniformly using `torch.linspace`.
-
-```python
-build_eviction_config(
-    strategy="sink_recent_uniform",
-    sink_tokens=256,
-    recent_tokens=512,
-    middle_budget=256,
-)
-```
-
-#### Stride mode
-
-Preserves every N-th block in the middle region. This option takes priority over the budget mode.
-
-```python
-build_eviction_config(
-    strategy="sink_recent_uniform",
-    sink_tokens=256,
-    recent_tokens=512,
-    uniform_stride=4,
-)
-```
-
-## RoPE Modes
-
-The position-encoding behavior after eviction can be selected with the following modes:
-
-- `abs`: Keeps the original absolute positions. This mode works without additional patching, but position gaps remain after eviction.
-- `raw_rel`: Uses `patch_model_raw_kv()` to store raw keys in the cache and reapply RoPE with continuous positions at attention time. This mode reduces the position-gap issue after eviction.
+The implementation is designed to support long-context evaluation, perplexity computation, greedy decoding, cache visualization, and RoPE-aware cache compaction.
 
 ## Installation
 
@@ -111,64 +19,168 @@ conda activate kv-eviction
 pip install -r requirements.txt
 ```
 
-If FlashAttention2 is available in the environment, the model loader will try to use it. Otherwise, it falls back to standard attention.
+FlashAttention-2 is used when available. If it is not available in the environment, the model loader falls back to standard attention.
 
-## Basic Usage
+## Repository Structure
 
-The eviction configuration can be created as follows:
+```text
+kv_eviction/
+├── __init__.py          # Package entry point and public API re-export
+├── eviction.py          # Core position-based eviction logic
+├── streaming.py         # Chunked prefill, perplexity evaluation, and greedy decoding
+├── rope_patch.py        # RoPE correction after cache compaction
+├── model_utils.py       # HuggingFace model/tokenizer loading utilities
+└── visualization.py     # Eviction-pattern heatmap generation
+
+scripts/
+├── run_longbench.py     # Long-context benchmark evaluation
+├── run_pg19.py          # Perplexity evaluation
+└── run_booksum.py       # Summarization evaluation
+
+configs/
+├── longbench.yaml       # Configuration for long-context evaluation
+├── pg19.yaml            # Configuration for perplexity evaluation
+└── booksum.yaml         # Configuration for summarization evaluation
+```
+
+## Module Overview
+
+### `eviction.py`
+
+This module contains the core eviction logic. It defines the eviction configuration and computes the token indices that should be retained in the KV cache.
+
+Main components include:
+
+- `SimpleEvictConfig`: configuration object for eviction strategies.
+- `build_simple_keep_token_idx()`: computes retained-token indices.
+- `evict_dynamic_cache_inplace()`: slices HuggingFace `DynamicCache` tensors in place to release memory.
+
+The core eviction logic depends only on PyTorch.
+
+### `streaming.py`
+
+This module supports chunk-based long-sequence processing. It feeds long inputs into the model by chunks and triggers eviction when the cache exceeds the target budget.
+
+Main functions include:
+
+- `streaming_prefill()`: performs chunked prefill with eviction.
+- `streaming_ppl()`: computes perplexity under streaming prefill and eviction.
+- `greedy_decode()`: performs greedy decoding after streaming prefill.
+
+### `rope_patch.py`
+
+This module handles position correction after cache compaction.
+
+When tokens are evicted from the KV cache, the remaining tokens may have discontinuous positions. The `raw_rel` mode addresses this issue by storing raw keys and reapplying RoPE using contiguous slot positions at attention time.
+
+This module supports RoPE-aware patching for Llama-style and Qwen2-style attention layers.
+
+### `model_utils.py`
+
+This module provides HuggingFace model and tokenizer loading utilities.
+
+It attempts to load models with FlashAttention-2 when available and falls back to standard attention otherwise.
+
+### `visualization.py`
+
+This module visualizes eviction patterns as heatmaps. The visualization shows which token positions are retained or removed after eviction.
+
+## Eviction Strategies
+
+The cache is partitioned into three regions:
+
+```text
+[0 ............. sink_end)       -> SINK   (always retained)
+[sink_end ... recent_start)      -> MIDDLE (strategy-dependent)
+[recent_start ...... total_len)  -> RECENT (always retained)
+```
+
+### `sink_recent`
+
+This strategy keeps only sink tokens and recent tokens. The entire middle region is removed.
 
 ```python
 from kv_eviction.eviction import build_eviction_config
 
 config = build_eviction_config(
-    strategy="sink_recent_uniform",
+    strategy="sink_recent",
     sink_tokens=256,
     recent_tokens=512,
-    middle_budget=256,
-    rope_mode="abs",
 )
 ```
 
-For RoPE correction mode:
+### `sink_recent_uniform`
+
+This strategy keeps sink tokens, recent tokens, and a uniform sample of blocks from the middle region.
+
+The amount of retained middle-context tokens can be controlled by either `middle_budget` or `uniform_stride`.
+
+#### Budget mode
 
 ```python
 from kv_eviction.eviction import build_eviction_config
-from kv_eviction.rope_patch import patch_model_raw_kv
 
 config = build_eviction_config(
     strategy="sink_recent_uniform",
     sink_tokens=256,
-    recent_tokens=512,
-    middle_budget=256,
-    rope_mode="raw_rel",
+    recent_tokens=1024,
+    middle_budget=2816,
 )
+```
+
+#### Stride mode
+
+```python
+from kv_eviction.eviction import build_eviction_config
+
+config = build_eviction_config(
+    strategy="sink_recent_uniform",
+    sink_tokens=256,
+    recent_tokens=1024,
+    uniform_stride=4,
+)
+```
+
+If both `middle_budget` and `uniform_stride` are specified, `uniform_stride` takes priority.
+
+## RoPE Modes
+
+The position-encoding behavior after eviction can be selected with the following modes.
+
+### `abs`
+
+This mode keeps the original absolute positions after eviction. It does not require additional patching, but position gaps remain after cache compaction.
+
+### `raw_rel`
+
+This mode stores raw keys in the cache and reapplies RoPE using contiguous slot positions at attention time.
+
+To use this mode, patch the model before running streaming prefill or evaluation:
+
+```python
+from kv_eviction.rope_patch import patch_model_raw_kv
 
 patch_model_raw_kv(model)
 ```
 
-## Running Long-Context Evaluation
-
-Example usage for perplexity evaluation:
-
-```python
-from kv_eviction.streaming import streaming_ppl
-
-ppl = streaming_ppl(
-    model=model,
-    tokenizer=tokenizer,
-    text=text,
-    config=config,
-    chunk_size=2048,
-    target_cache_size=4096,
-)
-
-print(ppl)
-```
+## Library Usage
 
 Example usage for streaming prefill and greedy decoding:
 
 ```python
+from kv_eviction.eviction import build_eviction_config
+from kv_eviction.rope_patch import patch_model_raw_kv
 from kv_eviction.streaming import streaming_prefill, greedy_decode
+
+config = build_eviction_config(
+    strategy="sink_recent_uniform",
+    sink_tokens=256,
+    recent_tokens=1024,
+    middle_budget=2816,
+    rope_mode="raw_rel",
+)
+
+patch_model_raw_kv(model)
 
 past_key_values = streaming_prefill(
     model=model,
@@ -188,6 +200,144 @@ output_ids = greedy_decode(
 )
 ```
 
+Example usage for perplexity evaluation:
+
+```python
+from kv_eviction.streaming import streaming_ppl
+
+ppl = streaming_ppl(
+    model=model,
+    tokenizer=tokenizer,
+    text=text,
+    config=config,
+    chunk_size=2048,
+    target_cache_size=4096,
+)
+
+print(ppl)
+```
+
+## Running Experiments
+
+All commands assume that the repository root is the working directory.
+
+### Long-context evaluation
+
+```bash
+python scripts/run_longbench.py \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --sink 256 \
+    --recent 1024 \
+    --middle 2816 \
+    --block-size 128 \
+    --rope-mode raw_rel \
+    --output results/longbench/
+```
+
+### Perplexity evaluation
+
+```bash
+python scripts/run_pg19.py \
+    --model meta-llama/Meta-Llama-3.1-8B \
+    --sink 64 \
+    --cache-size 16384 \
+    --block-size 128 \
+    --rope-mode raw_rel \
+    --middle-ratio 0.25
+```
+
+To run a cache-size or middle-ratio sweep, change the values of `--cache-size` and `--middle-ratio`.
+
+Example:
+
+```bash
+for cache_size in 16384 32768 65536; do
+    for middle_ratio in 0.25 0.75; do
+        python scripts/run_pg19.py \
+            --model meta-llama/Meta-Llama-3.1-8B \
+            --sink 64 \
+            --cache-size ${cache_size} \
+            --block-size 128 \
+            --rope-mode raw_rel \
+            --middle-ratio ${middle_ratio} \
+            --output results/pg19_cache_${cache_size}_middle_${middle_ratio}/
+    done
+done
+```
+
+### Summarization evaluation
+
+```bash
+python scripts/run_booksum.py \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --sink 64 \
+    --block-size 128 \
+    --rope-mode raw_rel \
+    --dynamic-cache
+```
+
+Cross-model validation can be performed by changing the model argument:
+
+```bash
+python scripts/run_booksum.py \
+    --model Qwen/Qwen2-7B-Instruct \
+    --sink 64 \
+    --block-size 128 \
+    --rope-mode raw_rel \
+    --dynamic-cache
+```
+
+### RoPE mode comparison
+
+Run the same evaluation with different RoPE modes:
+
+```bash
+python scripts/run_longbench.py \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --sink 256 \
+    --recent 1024 \
+    --middle 2816 \
+    --block-size 128 \
+    --rope-mode raw_rel \
+    --output results/longbench_raw_rel/
+```
+
+```bash
+python scripts/run_longbench.py \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --sink 256 \
+    --recent 1024 \
+    --middle 2816 \
+    --block-size 128 \
+    --rope-mode abs \
+    --output results/longbench_abs/
+```
+
+### Block-size sensitivity
+
+```bash
+for b in 64 128 192; do
+    python scripts/run_longbench.py \
+        --model meta-llama/Meta-Llama-3-8B-Instruct \
+        --sink 256 \
+        --recent 1024 \
+        --middle 2816 \
+        --block-size ${b} \
+        --rope-mode raw_rel \
+        --output results/blocksize_${b}/
+done
+```
+
+## Configuration Reference
+
+| Evaluation | Sink | Recent | Middle Budget | Total Cache | Block Size | RoPE Mode |
+|---|---:|---:|---:|---:|---:|---|
+| Long-context evaluation | 256 | 1,024 | 2,816 | 4,096 | 128 | `raw_rel` |
+| Perplexity evaluation | 64 | varies | varies | 16,384 | 128 | `raw_rel` |
+| Summarization evaluation | 64 | dynamic | dynamic | dynamic | 128 | `raw_rel` |
+
+YAML versions of the experiment configurations are provided in `configs/`.
+
 ## Visualization
 
 Eviction patterns can be visualized as heatmaps.
@@ -202,11 +352,11 @@ visualize_eviction_pattern(
 )
 ```
 
-The generated heatmap shows which token positions are preserved or removed after eviction.
+The generated heatmap shows which token positions are retained or removed after eviction.
 
 ## Notes
 
 - This repository is anonymized for double-blind review.
-- No author names, affiliations, or personal paths are included.
-- The repository is intended to provide the implementation and scripts necessary to reproduce the main behavior of the proposed KV cache eviction method.
-- Model checkpoints and datasets should be downloaded separately according to their original licenses.
+- No author names, affiliations, personal emails, or personal filesystem paths are included.
+- Model checkpoints and datasets must be obtained separately according to their original licenses.
+- The repository provides implementation and scripts for reproducing the main experimental behavior of the submitted paper.
